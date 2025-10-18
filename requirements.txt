@@ -1,0 +1,6 @@
+fastapi==0.104.1       # Web框架
+uvicorn==0.24.0        # 运行FastAPI的服务器
+python-dotenv==1.0.0   # 读取.env文件
+dashscope==1.14.0      # 阿里云通义千问官方SDK
+pydantic==2.5.2        # 数据校验（FastAPI依赖）
+loguru==0.7.2          # 日志工具
