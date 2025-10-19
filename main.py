@@ -9,6 +9,10 @@ from app.services.translation import TranslationService
 from app.services.summarization import SummarizationService
 from app.services.chat import ChatService
 from app.api.routes import router as api_router
+from typing import Any, Dict, Callable
+import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI(title="FastAPI Demo with Config")
 
@@ -29,6 +33,44 @@ app.add_middleware(
 app.include_router(api_router)
 
 
+# 简单的内存任务管理器：提交后台任务并提供状态轮询
+class TaskManager:
+    def __init__(self, max_workers: int = 4) -> None:
+        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    def submit(self, work_fn: Callable[..., Any], *, task_type: str, params: Dict[str, Any]) -> str:
+        task_id = uuid.uuid4().hex
+        with self._lock:
+            self._tasks[task_id] = {
+                "id": task_id,
+                "status": "pending",
+                "type": task_type,
+                "params": params,
+                "result": None,
+                "error": None,
+            }
+        def _run():
+            with self._lock:
+                self._tasks[task_id]["status"] = "running"
+            try:
+                result = work_fn(**params)
+                with self._lock:
+                    self._tasks[task_id]["status"] = "succeed"
+                    self._tasks[task_id]["result"] = result
+            except Exception as e:
+                with self._lock:
+                    self._tasks[task_id]["status"] = "failed"
+                    self._tasks[task_id]["error"] = str(e)
+        self._executor.submit(_run)
+        return task_id
+
+    def get(self, task_id: str) -> Dict[str, Any] | None:
+        with self._lock:
+            return self._tasks.get(task_id)
+
+
 @app.on_event("startup")
 def on_startup() -> None:
     # 加载配置并挂载到应用状态
@@ -45,6 +87,8 @@ def on_startup() -> None:
     app.state.translation_service = TranslationService(qwen)
     app.state.summarization_service = SummarizationService(qwen)
     app.state.chat_service = ChatService(qwen)
+    # 挂载任务管理器（用于异步任务提交与轮询）
+    app.state.task_manager = TaskManager(max_workers=4)
 
     # 避免泄露密钥，仅打印掩码后的信息
     masked_key = (
