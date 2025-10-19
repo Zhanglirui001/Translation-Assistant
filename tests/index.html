@@ -27,7 +27,12 @@
 <body>
   <header>
     <h1>Translation-Assistant 前端测试界面</h1>
-    <div class="desc">用于调试和验证后端 API（翻译与摘要）。当前服务器：<span id="base">-</span>。你也可以打开 <a href="/docs" target="_blank">/docs</a> 进行接口自测。</div>
+    <div class="desc">用于调试和验证后端 API（翻译与摘要）。当前服务器：<span id="base">-</span>。你也可以打开 <a id="docs-link" href="#" target="_blank">/docs</a> 进行接口自测。</div>
+    <div class="row">
+      <input id="backend-base" type="text" placeholder="后端地址，例如 http://localhost:8000" />
+      <button id="save-backend">保存后端地址</button>
+    </div>
+    <div class="muted">提示：如果此页面在 5500 端口打开（本地静态服务器），请将后端地址设置为 http://localhost:8000 以避免 501 Unsupported method ('POST')。</div>
   </header>
 
   <section class="grid">
@@ -60,6 +65,15 @@
       </div>
       <div class="result" id="result-sum"></div>
     </div>
+    <div class="card" id="card-chat">
+      <h2>常规对话 /api/chat</h2>
+      <textarea id="input-chat" rows="4" placeholder="输入你的问题，例如：你好"></textarea>
+      <div class="row">
+        <button id="btn-chat">发送</button>
+        <span id="status-chat" class="muted">等待操作</span>
+      </div>
+      <div class="result" id="result-chat"></div>
+    </div>
   </section>
 
   <footer>
@@ -67,11 +81,47 @@
   </footer>
 
   <script>
-    const base = window.location.origin;
-    document.getElementById('base').textContent = base;
+    // 后端地址管理：优先使用本地存储，其次在 5500 端口默认指向 8000，其余情况下默认使用当前来源
+    const DEFAULT_BACKEND = (window.location.port === '5500' ? 'http://localhost:8000' : window.location.origin);
+    function getBackendBase() {
+      const v = localStorage.getItem('backendBase');
+      const val = (v && typeof v === 'string') ? v.trim().replace(/\/+$/, '') : '';
+      // 优先使用用户保存的后端地址；否则默认使用当前页面来源（若在 5500 端口，则默认 8000）
+      return val || DEFAULT_BACKEND;
+    }
+    function setBackendBase(v) {
+      const val = String(v || '').trim().replace(/\/+$/, '');
+      if (val) localStorage.setItem('backendBase', val);
+    }
+
+    // 新增：统一构造完整请求 URL，便于在 UI 和日志中使用
+    function getFullUrl(path) {
+      return getBackendBase().replace(/\/+$/, '') + String(path || '');
+    }
+
+    const backendBase = getBackendBase();
+    document.getElementById('base').textContent = backendBase;
+    const backendInput = document.getElementById('backend-base');
+    if (backendInput) backendInput.value = backendBase;
+    const saveBtn = document.getElementById('save-backend');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => {
+        const v = backendInput.value;
+        setBackendBase(v);
+        // 更新显示并刷新，确保后续请求使用新后端
+        document.getElementById('base').textContent = getBackendBase();
+        location.reload();
+      });
+    }
+    // 动态修正 /docs 链接为后端地址
+    const docsLink = document.getElementById('docs-link');
+    if (docsLink) {
+      docsLink.href = getBackendBase().replace(/\/+$/, '') + '/docs';
+    }
 
     async function postJSON(path, payload) {
-      const url = base + path;
+      const url = getFullUrl(path);
+      console.log('[postJSON] POST ->', url);
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -110,6 +160,115 @@
       return raw;
     }
 
+    function isEventStream(res) {
+      const ct = res.headers.get('Content-Type') || res.headers.get('content-type') || '';
+      return typeof ct === 'string' && ct.includes('text/event-stream');
+    }
+
+    // 新增：以 text/plain 发送，规避跨域预检失败时的网络错误
+    async function streamSSEPostPlain(path, text, onChunk, onEnd, onError) {
+      const url = getFullUrl(path);
+      console.log('[streamSSEPostPlain] POST ->', url);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain', 'Accept': 'text/event-stream' },
+        body: String(text || '')
+      });
+      if (!isEventStream(res) || !res.body) {
+        const out = await getResponseText(res);
+        onChunk?.(out);
+        onEnd?.();
+        return;
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buf = '';
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split(/\r?\n/);
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line) continue;
+            if (line.startsWith('event:')) {
+              const evt = line.slice(6).trim();
+              if (evt === 'end') onEnd?.();
+              continue;
+            }
+            if (line.startsWith('data:')) {
+              const data = line.slice(5).trim();
+              if (data === '[DONE]') {
+                onEnd?.();
+              } else {
+                onChunk?.(data);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        onError?.(e);
+      } finally {
+        onEnd?.();
+      }
+    }
+
+    async function streamSSEPost(path, payload, onChunk, onEnd, onError) {
+      const url = getFullUrl(path);
+      console.log('[streamSSEPost] POST ->', url);
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+          body: JSON.stringify(payload)
+        });
+        if (!isEventStream(res) || !res.body) {
+          // 回退到非流式（兼容旧接口或代理改写的情况）
+          const out = await getResponseText(res);
+          onChunk?.(out);
+          onEnd?.();
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buf = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split(/\r?\n/);
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line) continue;
+            if (line.startsWith('event:')) {
+              const evt = line.slice(6).trim();
+              if (evt === 'end') onEnd?.();
+              continue;
+            }
+            if (line.startsWith('data:')) {
+              const data = line.slice(5).trim();
+              if (data === '[DONE]') {
+                onEnd?.();
+              } else {
+                onChunk?.(data);
+              }
+            }
+          }
+        }
+        onEnd?.();
+      } catch (e) {
+        console.warn('[streamSSEPost] fetch error, fallback to text/plain', e);
+        const text = (payload && typeof payload === 'object') ? (payload.text || '') : String(payload || '');
+        try {
+          await streamSSEPostPlain(path, text, onChunk, onEnd, onError);
+        } catch (e2) {
+          onError?.(e2);
+          onEnd?.();
+        }
+      }
+    }
+
     function setStatus(el, ok, msg) {
       el.textContent = msg;
       el.className = 'muted ' + (ok ? 'ok' : 'err');
@@ -120,13 +279,20 @@
       const text = document.getElementById('input-zh').value.trim();
       const statusEl = document.getElementById('status-zh2en');
       const resultEl = document.getElementById('result-zh2en');
+      const path = '/api/translate/zh-to-en';
+      const targetUrl = getFullUrl(path);
       if (!text) { setStatus(statusEl, false, '请输入中文文本'); return; }
-      setStatus(statusEl, true, '请求中...');
+      setStatus(statusEl, true, '流式请求中... (' + targetUrl + ')');
+      resultEl.textContent = '';
       try {
-        const res = await postJSON('/api/translate/zh-to-en', { text });
-        const out = await getResponseText(res);
-        resultEl.textContent = out;
-        setStatus(statusEl, res.ok, res.ok ? '成功' : `失败 (${res.status})`);
+        await streamSSEPost(path, { text }, (chunk) => {
+          resultEl.textContent += chunk;
+        }, () => {
+          setStatus(statusEl, true, '成功');
+        }, (e) => {
+          setStatus(statusEl, false, '请求失败');
+          resultEl.textContent += '\n[Error] ' + String(e);
+        });
       } catch (e) {
         setStatus(statusEl, false, '请求失败');
         resultEl.textContent = String(e);
@@ -137,13 +303,20 @@
       const text = document.getElementById('input-en').value.trim();
       const statusEl = document.getElementById('status-en2zh');
       const resultEl = document.getElementById('result-en2zh');
+      const path = '/api/translate/en-to-zh';
+      const targetUrl = getFullUrl(path);
       if (!text) { setStatus(statusEl, false, 'Please input English text'); return; }
-      setStatus(statusEl, true, 'Requesting...');
+      setStatus(statusEl, true, 'Streaming... (' + targetUrl + ')');
+      resultEl.textContent = '';
       try {
-        const res = await postJSON('/api/translate/en-to-zh', { text });
-        const out = await getResponseText(res);
-        resultEl.textContent = out;
-        setStatus(statusEl, res.ok, res.ok ? 'Success' : `Failed (${res.status})`);
+        await streamSSEPost(path, { text }, (chunk) => {
+          resultEl.textContent += chunk;
+        }, () => {
+          setStatus(statusEl, true, 'Success');
+        }, (e) => {
+          setStatus(statusEl, false, 'Request error');
+          resultEl.textContent += '\n[Error] ' + String(e);
+        });
       } catch (e) {
         setStatus(statusEl, false, 'Request error');
         resultEl.textContent = String(e);
@@ -154,13 +327,43 @@
       const text = document.getElementById('input-sum').value.trim();
       const statusEl = document.getElementById('status-sum');
       const resultEl = document.getElementById('result-sum');
+      const path = '/api/summarize';
+      const targetUrl = getFullUrl(path);
       if (!text) { setStatus(statusEl, false, '请输入需要摘要的文本'); return; }
-      setStatus(statusEl, true, '请求中...');
+      setStatus(statusEl, true, '流式请求中... (' + targetUrl + ')');
+      resultEl.textContent = '';
       try {
-        const res = await postJSON('/api/summarize', { text });
-        const out = await getResponseText(res);
-        resultEl.textContent = out;
-        setStatus(statusEl, res.ok, res.ok ? '成功' : `失败 (${res.status})`);
+        await streamSSEPost(path, { text }, (chunk) => {
+          resultEl.textContent += chunk;
+        }, () => {
+          setStatus(statusEl, true, '成功');
+        }, (e) => {
+          setStatus(statusEl, false, '请求失败');
+          resultEl.textContent += '\n[Error] ' + String(e);
+        });
+      } catch (e) {
+        setStatus(statusEl, false, '请求失败');
+        resultEl.textContent = String(e);
+      }
+    });
+    document.getElementById('btn-chat').addEventListener('click', async () => {
+      const text = document.getElementById('input-chat').value.trim();
+      const statusEl = document.getElementById('status-chat');
+      const resultEl = document.getElementById('result-chat');
+      const path = '/api/chat';
+      const targetUrl = getFullUrl(path);
+      if (!text) { setStatus(statusEl, false, '请输入内容'); return; }
+      setStatus(statusEl, true, '流式请求中... (' + targetUrl + ')');
+      resultEl.textContent = '';
+      try {
+        await streamSSEPost(path, { text }, (chunk) => {
+          resultEl.textContent += chunk;
+        }, () => {
+          setStatus(statusEl, true, '成功');
+        }, (e) => {
+          setStatus(statusEl, false, '请求失败');
+          resultEl.textContent += '\n[Error] ' + String(e);
+        });
       } catch (e) {
         setStatus(statusEl, false, '请求失败');
         resultEl.textContent = String(e);
