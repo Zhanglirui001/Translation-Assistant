@@ -142,11 +142,64 @@ class QwenClient:
         return self.chat(messages)
 
 
+class TranslationService:
+    """翻译服务：中译英、英译中"""
+    def __init__(self, client: QwenClient) -> None:
+        self.client = client
+
+    def zh_to_en(self, text: str) -> str:
+        """将中文翻译为英文。"""
+        return self.client.translate(text, target_lang="English", source_lang="Chinese")
+
+    def en_to_zh(self, text: str) -> str:
+        """将英文翻译为中文。"""
+        return self.client.translate(text, target_lang="Chinese", source_lang="English")
+
+
+class SummarizationService:
+    """总结服务：精简长文本"""
+    def __init__(self, client: QwenClient) -> None:
+        self.client = client
+
+    def summarize(self, text: str, target_lang: Optional[str] = None, max_points: int = 5) -> str:
+        """对长文本进行精简总结，可指定目标语言与要点数量。"""
+        system_prompt = (
+            "You are a professional summarization assistant. Summarize the user's text into a concise form. "
+            "Focus on key points, facts, numbers, and dates. Remove redundancy and filler. "
+            "If a target language is specified, output in that language; otherwise, keep the original language. "
+            f"Limit to about {max_points} bullet points or a short paragraph. "
+            "Output only the summary text."
+        )
+        if target_lang:
+            system_prompt += f" Target language: {target_lang}."
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ]
+        return self.client.chat(messages)
+
+
 def get_qwen_client() -> QwenClient:
     client = getattr(app.state, "qwen_client", None)
     if client is None:
         raise RuntimeError("QwenClient 未初始化，请检查应用启动流程是否成功加载配置。")
     return client
+
+
+def get_translation_service() -> TranslationService:
+    """获取翻译服务。"""
+    svc = getattr(app.state, "translation_service", None)
+    if svc is None:
+        raise RuntimeError("TranslationService 未初始化，请检查应用启动流程。")
+    return svc
+
+
+def get_summarization_service() -> SummarizationService:
+    """获取总结服务。"""
+    svc = getattr(app.state, "summarization_service", None)
+    if svc is None:
+        raise RuntimeError("SummarizationService 未初始化，请检查应用启动流程。")
+    return svc
 
 
 @app.on_event("startup")
@@ -157,6 +210,9 @@ def on_startup() -> None:
     # 初始化通义千问客户端
     if dashscope is not None:
         app.state.qwen_client = QwenClient(settings)
+        # 初始化业务服务（翻译与总结），供路由或其它模块复用
+        app.state.translation_service = TranslationService(app.state.qwen_client)
+        app.state.summarization_service = SummarizationService(app.state.qwen_client)
     else:
         logger.warning("dashscope SDK 未可用，QwenClient 未初始化。")
 
