@@ -74,6 +74,16 @@
       </div>
       <div class="result" id="result-chat"></div>
     </div>
+
+    <!-- 新增：功能列表展示 -->
+    <div class="card" id="card-functions">
+      <h2>功能列表 /api/functions</h2>
+      <div class="row">
+        <button id="btn-functions">获取功能列表</button>
+        <span id="status-functions" class="muted">等待操作</span>
+      </div>
+      <div class="result" id="result-functions"></div>
+    </div>
   </section>
 
   <footer>
@@ -256,19 +266,33 @@
             }
           }
         }
-        onEnd?.();
       } catch (e) {
-        console.warn('[streamSSEPost] fetch error, fallback to text/plain', e);
-        const text = (payload && typeof payload === 'object') ? (payload.text || '') : String(payload || '');
-        try {
-          await streamSSEPostPlain(path, text, onChunk, onEnd, onError);
-        } catch (e2) {
-          onError?.(e2);
-          onEnd?.();
-        }
+        onError?.(e);
+      } finally {
+        onEnd?.();
       }
     }
 
+    // 新增：功能列表按钮事件
+    const btnFunctions = document.getElementById('btn-functions');
+    if (btnFunctions) {
+      btnFunctions.addEventListener('click', async () => {
+        const statusEl = document.getElementById('status-functions');
+        const resultEl = document.getElementById('result-functions');
+        statusEl.textContent = '请求中...';
+        resultEl.textContent = '';
+        try {
+          const url = getFullUrl('/api/functions');
+          const res = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
+          const obj = await res.json();
+          statusEl.textContent = res.ok ? '成功' : `错误: ${res.status}`;
+          resultEl.textContent = JSON.stringify(obj, null, 2);
+        } catch (e) {
+          statusEl.textContent = '请求失败';
+          resultEl.textContent = String(e);
+        }
+      });
+    }
     function setStatus(el, ok, msg) {
       el.textContent = msg;
       el.className = 'muted ' + (ok ? 'ok' : 'err');

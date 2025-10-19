@@ -7,6 +7,21 @@ from fastapi import Query
 
 router = APIRouter()
 
+# 功能列表接口：返回后端可用功能及调用方式
+@router.get("/api/functions")
+async def list_functions():
+    return {
+        "features": [
+            {"name": "translate_zh_to_en", "kind": "stream", "path": "/api/translate/zh-to-en", "method": "POST", "params": ["text"]},
+            {"name": "translate_en_to_zh", "kind": "stream", "path": "/api/translate/en-to-zh", "method": "POST", "params": ["text"]},
+            {"name": "summarize", "kind": "stream", "path": "/api/summarize", "method": "POST", "params": ["text","target_lang?","max_points?"]},
+            {"name": "chat", "kind": "stream", "path": "/api/chat", "method": "POST", "params": ["text 或 messages"]},
+            {"name": "tasks_translate", "kind": "async", "path": "/api/tasks/translate", "method": "POST", "params": ["text","direction"]},
+            {"name": "tasks_summarize", "kind": "async", "path": "/api/tasks/summarize", "method": "POST", "params": ["text","target_lang?","max_points?"]},
+            {"name": "tasks_status", "kind": "async", "path": "/api/tasks/status?task_id=...", "method": "GET", "params": ["task_id"]},
+        ]
+    }
+
 
 class TranslateRequest(BaseModel):
     text: str
@@ -118,6 +133,12 @@ async def get_task_status(req: Request, task_id: str = Query(..., description="�
         "result": data.get("result"),
         "error": data.get("error"),
     }
+
+# 新增：列出当前任务简要信息
+@router.get("/api/tasks/list")
+async def list_tasks(req: Request):
+    tm = req.app.state.task_manager
+    return {"tasks": tm.list()}
 
 # 翻译接口：中文 -> 英文（SSE 流式）
 @router.post("/api/translate/zh-to-en")

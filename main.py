@@ -70,6 +70,20 @@ class TaskManager:
         with self._lock:
             return self._tasks.get(task_id)
 
+    # 新增：列出当前任务的简要信息（不返回 params 与完整 result）
+    def list(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                {
+                    "id": t["id"],
+                    "status": t["status"],
+                    "type": t["type"],
+                    "has_result": t.get("result") is not None,
+                    "has_error": t.get("error") is not None,
+                }
+                for t in self._tasks.values()
+            ]
+
 
 @app.on_event("startup")
 def on_startup() -> None:
