@@ -1,28 +1,29 @@
-from typing import Generator, Dict, List
+from typing import Iterable, Dict, List
 from loguru import logger
 from app.clients.qwen_client import QwenClient
 
 
 class ChatService:
-    """常规对话服务，负责将客户端的流式输出封装为 SSE。"""
+    """常规对话服务，返回纯文本片段；SSE 封装由路由层负责。"""
 
     def __init__(self, client: QwenClient) -> None:
         self.client = client
 
-    def chat_stream(self, text: str) -> Generator[str, None, None]:
-        """将用户文本发送到模型，按片段返回文本（SSE 数据行格式）。"""
-        if not text or not text.strip():
-            # 直接返回一个空片段，前端可自行忽略
-            yield "data: \n\n"
-            return
-        messages: List[Dict[str, str]] = [{"role": "user", "content": text.strip()}]
+    def chat_stream(self, messages: List[Dict[str, str]]) -> Iterable[str]:
+        """接收 OpenAI 风格 messages，调用上游流式接口并逐片返回纯文本。"""
+        # 规范化与过滤空内容
+        norm_msgs: List[Dict[str, str]] = []
+        for m in messages or []:
+            role = (m.get("role") or "user").strip()
+            content = (m.get("content") or "").strip()
+            if content:
+                norm_msgs.append({"role": role, "content": content})
+        if not norm_msgs:
+            return []  # 无内容则返回空迭代
         try:
-            for chunk in self.client.chat_stream(messages):
-                # 将纯文本片段包装为 SSE 数据行
-                yield f"data: {chunk}\n\n"
+            for chunk in self.client.chat_stream(norm_msgs):
+                if chunk:
+                    yield chunk
         except Exception as e:
-            # 出错时通过 SSE 通知前端
             logger.error("ChatService.chat_stream 失败: {}", e)
-            yield f"data: [ERROR] {e}\n\n"
-        # 结束标记，便于前端停止读取
-        yield "data: [DONE]\n\n"
+            raise

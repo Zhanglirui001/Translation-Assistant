@@ -84,6 +84,32 @@ class QwenClient:
         # 兜底：转换为字符串
         return str(resp)
 
+    def _extract_stream_text(self, chunk: Dict[str, Any]) -> str:
+        """从流式事件块中提取增量文本。兼容 OpenAI/通用结构。"""
+        try:
+            # OpenAI 风格：choices[0].delta.content
+            choices = chunk.get("choices")
+            if isinstance(choices, list) and choices:
+                delta = choices[0].get("delta")
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        return content
+                # 某些实现直接返回 message.content（如最终块）
+                msg = choices[0].get("message")
+                if isinstance(msg, dict):
+                    content = msg.get("content")
+                    if isinstance(content, str):
+                        return content
+                # 或者直接 text
+                text = choices[0].get("text")
+                if isinstance(text, str):
+                    return text
+        except Exception:
+            pass
+        # 兜底：不识别则返回空字符串
+        return ""
+
     def _http_request(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """在 dashscope SDK 不可用时，使用兼容模式 HTTP 直接调用。"""
         url = self.settings.base_url.rstrip("/") + "/" + endpoint.lstrip("/")
@@ -186,10 +212,87 @@ class QwenClient:
 
     # 新增：流式对话，返回文本片段生成器
     def chat_stream(self, messages: List[Dict[str, str]]) -> Generator[str, None, None]:
-        """返回一个逐段文本生成器，若 SDK 不支持则模拟分片。"""
-        # 简化实现：直接调用 chat 并把文本切片模拟
+        """返回一个逐段文本生成器；在 HTTP 兼容模式下尝试真实流式，否则回退为分片。"""
+        # 优先使用 HTTP 兼容模式的真实流式
+        if self.use_http_fallback and requests is not None:
+            url = self.settings.base_url.rstrip("/") + "/chat/completions"
+            base_headers = {
+                "Content-Type": "application/json",
+                # 接受 SSE 流，同时兼容非 SSE 的 JSON
+                "Accept": "text/event-stream, application/json",
+                "User-Agent": "TranslationAssistant/1.0",
+                "Authorization": f"Bearer {self.settings.api_key}",
+                "Accept-Encoding": "identity",
+            }
+            payload = {"model": self.settings.model, "messages": messages, "stream": True}
+            verify = self.settings.verify_ssl
+            last_err: Exception | None = None
+            for attempt in range(3):
+                # 使用短连接以规避某些网关在 keep-alive 下的 EOF 异常
+                headers = dict(base_headers)
+                headers["Connection"] = "close"
+                try:
+                    with requests.post(
+                        url,
+                        headers=headers,
+                        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                        # 设置连接与读取超时，提升握手与读取的健壮性
+                        timeout=(5, self.settings.timeout),
+                        verify=verify,
+                        stream=True,
+                    ) as r:
+                        r.raise_for_status()
+                        ct = (r.headers.get("Content-Type") or "").lower()
+                        if "text/event-stream" in ct:
+                            # 逐行解析 SSE: data: {...}\n\n
+                            for raw_line in r.iter_lines(decode_unicode=True):
+                                if not raw_line:
+                                    continue
+                                line = raw_line.strip()
+                                if not line.startswith("data:"):
+                                    continue
+                                data_str = line[5:].strip()
+                                if not data_str:
+                                    continue
+                                if data_str == "[DONE]":
+                                    break
+                                try:
+                                    evt = json.loads(data_str)
+                                except Exception:
+                                    # 非 JSON 的 data，直接当作文本片段输出
+                                    if data_str:
+                                        yield data_str
+                                    continue
+                                piece = self._extract_stream_text(evt)
+                                if piece:
+                                    yield piece
+                            return
+                        # 非 SSE：读取完整响应并回退为分片输出
+                        try:
+                            body_text = r.text
+                            try:
+                                obj = json.loads(body_text)
+                                text = self._extract_text(obj)
+                            except Exception:
+                                text = body_text
+                        except Exception:
+                            text = ""
+                        size = 16
+                        for i in range(0, len(text), size):
+                            yield text[i:i+size]
+                        return
+                except Exception as e:
+                    last_err = e
+                    # 首次遇到 SSL 错误时关闭证书校验再试
+                    if attempt == 0 and verify:
+                        verify = False
+                    if attempt < 2:
+                        time.sleep(0.5 * (2 ** attempt))
+                    else:
+                        logger.warning("HTTP 真实流式失败，回退为分片: {}", last_err)
+                        break
+        # 当 SDK 可用或 requests 不可用，回退为一次性响应后分片输出
         text = self.chat(messages)
-        # 按固定大小分片（保持与之前实现一致）
         size = 16
         for i in range(0, len(text), size):
             yield text[i:i+size]
