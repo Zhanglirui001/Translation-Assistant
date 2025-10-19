@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>异步任务测试页（翻译/总结 轮询）</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Microsoft YaHei", "Noto Sans", sans-serif; margin: 0; padding: 24px; line-height: 1.6; }
+    header { margin-bottom: 16px; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    .desc { color: #666; font-size: 14px; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: rgba(255,255,255,0.6); backdrop-filter: blur(4px); }
+    .card h2 { margin: 0 0 8px; font-size: 16px; }
+    textarea, input[type="text"], select { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid #ccc; font-size: 14px; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #888; cursor: pointer; }
+    .result { margin-top: 8px; padding: 8px; border-radius: 8px; background: #f6f8fa; min-height: 48px; white-space: pre-wrap; }
+    .muted { color: #666; font-size: 12px; }
+    footer { margin-top: 24px; font-size: 12px; color: #666; }
+    .ok { color: #0a7; }
+    .err { color: #d33; }
+    a { color: #06c; text-decoration: none; }
+    /* 新增：任务列表表格与状态样式 */
+    .table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .table th, .table td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+    .mono { font-family: ui-monospace, Menlo, Consolas, Monaco, "SFMono-Regular", monospace; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #ddd; }
+    .badge.succeed { background: #e6ffed; color: #067d43; border-color: #b7f5c9; }
+    .badge.running { background: #e7f3ff; color: #0854a1; border-color: #c4defa; }
+    .badge.failed { background: #ffecec; color: #a11010; border-color: #f5c2c2; }
+    .badge.pending { background: #f7f7f7; color: #666; border-color: #ddd; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>异步任务测试页（翻译/总结 轮询）</h1>
+    <div class="desc">用于测试 /api/tasks/translate 与 /api/tasks/summarize 的提交与轮询。当前服务器：<span id="base">-</span>。返回结构包括 status、result、error。</div>
+    <div class="row">
+      <input id="backend-base" type="text" placeholder="后端地址，例如 http://localhost:8002" />
+      <button id="save-backend">保存后端地址</button>
+      <a id="back-home" href="./index.html">返回主测试页</a>
+    </div>
+  </header>
+
+  <section class="grid">
+    <div class="card">
+      <h2>提交翻译异步任务 /api/tasks/translate</h2>
+      <select id="direction">
+        <option value="zh_to_en">中文 → 英文</option>
+        <option value="en_to_zh">英文 → 中文</option>
+      </select>
+      <textarea id="text-translate" rows="4" placeholder="输入翻译文本"></textarea>
+      <div class="row">
+        <button id="btn-submit-translate">提交翻译任务</button>
+        <span id="status-translate" class="muted">等待操作</span>
+      </div>
+      <div class="result" id="result-translate"></div>
+    </div>
+
+    <div class="card">
+      <h2>提交摘要异步任务 /api/tasks/summarize</h2>
+      <textarea id="text-sum" rows="6" placeholder="输入需要摘要的文本"></textarea>
+      <div class="row">
+        <label>目标语言：</label>
+        <input id="target-lang" type="text" placeholder="可选，例如 zh 或 en" />
+        <label>要点数：</label>
+        <input id="max-points" type="text" placeholder="默认 5" />
+      </div>
+      <div class="row">
+        <button id="btn-submit-sum">提交摘要任务</button>
+        <span id="status-sum" class="muted">等待操作</span>
+      </div>
+      <div class="result" id="result-sum"></div>
+    </div>
+
+    <div class="card">
+      <h2>轮询任务状态 /api/tasks/status</h2>
+      <input id="task-id" type="text" placeholder="输入任务ID（也可由上面提交返回自动填充）" />
+      <div class="row">
+        <button id="btn-poll">开始轮询</button>
+        <button id="btn-stop">停止轮询</button>
+        <span id="status-poll" class="muted">等待操作</span>
+      </div>
+      <div class="result" id="result-poll"></div>
+      <!-- 新增：格式化展示区域（更直观地呈现具体结果） -->
+      <div class="result" id="result-poll-pretty"></div>
+    </div>
+
+    <!-- 新增：任务列表总览 -->
+    <div class="card">
+      <h2>任务列表总览 /api/tasks/list</h2>
+      <div class="row">
+        <button id="btn-refresh-list">刷新列表</button>
+        <label style="margin-left:8px"><input type="checkbox" id="auto-refresh-list" /> 自动刷新</label>
+        <label style="margin-left:8px">间隔(s)：<input id="auto-refresh-interval" type="number" min="1" value="2" style="width:64px" /></label>
+        <span id="status-list" class="muted" style="margin-left:auto">等待操作</span>
+      </div>
+      <div class="row">
+        <span id="list-summary" class="muted">-</span>
+      </div>
+      <table class="table" id="table-list">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>类型</th>
+            <th>状态</th>
+            <th>有结果</th>
+            <th>有错误</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="table-list-body"></tbody>
+      </table>
+      <div class="result" id="result-list"></div>
+    </div>
+  </section>
+
+  <footer>
+    说明：轮询默认每 1s 请求一次，最多 30 次；可在代码中调整。适合不支持 SSE 的客户端或长耗时任务。
+  </footer>
+
+  <script>
+    const DEFAULT_BACKEND = window.location.origin;
+    function getBackendBase() {
+      const v = localStorage.getItem('backendBase');
+      const val = (v && typeof v === 'string') ? v.trim().replace(/\/+$/, '') : '';
+      return val || DEFAULT_BACKEND;
+    }
+    function setBackendBase(v) {
+      const val = String(v || '').trim().replace(/\/+$/, '');
+      if (val) localStorage.setItem('backendBase', val);
+    }
+    function getFullUrl(path) {
+      return getBackendBase().replace(/\/+$/, '') + String(path || '');
+    }
+
+    const backendBase = getBackendBase();
+    document.getElementById('base').textContent = backendBase;
+    const backendInput = document.getElementById('backend-base');
+    if (backendInput) backendInput.value = backendBase;
+    document.getElementById('save-backend').addEventListener('click', () => {
+      const v = backendInput.value;
+      setBackendBase(v);
+      document.getElementById('base').textContent = getBackendBase();
+      alert('已保存后端地址');
+    });
+
+    async function postJSON(path, payload) {
+      const url = getFullUrl(path);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return res;
+    }
+    async function getJSON(path) {
+      const url = getFullUrl(path);
+      const res = await fetch(url, { method: 'GET', headers: { 'Accept': 'application/json' } });
+      return res;
+    }
+
+    // 提交翻译任务
+    document.getElementById('btn-submit-translate').addEventListener('click', async () => {
+      const text = document.getElementById('text-translate').value.trim();
+      const direction = document.getElementById('direction').value;
+      const statusEl = document.getElementById('status-translate');
+      const resultEl = document.getElementById('result-translate');
+      statusEl.textContent = '提交中...';
+      resultEl.textContent = '';
+      try {
+        const res = await postJSON('/api/tasks/translate', { text, direction });
+        const obj = await res.json();
+        statusEl.textContent = res.ok ? '已提交' : `错误: ${res.status}`;
+        resultEl.textContent = JSON.stringify(obj, null, 2);
+        if (obj.task_id) {
+          document.getElementById('task-id').value = obj.task_id;
+        }
+      } catch (e) {
+        statusEl.textContent = '请求失败';
+        resultEl.textContent = String(e);
+      }
+    });
+
+    // 提交摘要任务
+    document.getElementById('btn-submit-sum').addEventListener('click', async () => {
+      const text = document.getElementById('text-sum').value.trim();
+      const target_lang = document.getElementById('target-lang').value.trim() || null;
+      const max_points_raw = document.getElementById('max-points').value.trim();
+      const max_points = max_points_raw ? Number(max_points_raw) : 5;
+      const statusEl = document.getElementById('status-sum');
+      const resultEl = document.getElementById('result-sum');
+      statusEl.textContent = '提交中...';
+      resultEl.textContent = '';
+      try {
+        const res = await postJSON('/api/tasks/summarize', { text, target_lang, max_points });
+        const obj = await res.json();
+        statusEl.textContent = res.ok ? '已提交' : `错误: ${res.status}`;
+        resultEl.textContent = JSON.stringify(obj, null, 2);
+        if (obj.task_id) {
+          document.getElementById('task-id').value = obj.task_id;
+        }
+      } catch (e) {
+        statusEl.textContent = '请求失败';
+        resultEl.textContent = String(e);
+      }
+    });
+
+    // 轮询逻辑
+    let pollTimer = null;
+    function formatPretty(type, text) {
+      const t = String(text || '').trim();
+      if (!t) return '';
+      const safe = (s) => s.replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+      // 摘要：按换行拆分为要点，更直观
+      if (String(type || '').includes('summarize')) {
+        const lines = t.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        if (lines.length > 1) {
+          return '<ul>' + lines.map(l => '<li>' + safe(l) + '</li>').join('') + '</ul>';
+        }
+      }
+      // 默认：以预格式文本展示，便于复制
+      return '<pre class="mono" style="margin:0">' + safe(t) + '</pre>';
+    }
+    async function fetchStatusOnce(taskId) {
+      const statusEl = document.getElementById('status-poll');
+      const resultEl = document.getElementById('result-poll');
+      const prettyEl = document.getElementById('result-poll-pretty');
+      statusEl.textContent = '查询中...';
+      resultEl.textContent = '';
+      prettyEl.innerHTML = '';
+      try {
+        const res = await getJSON('/api/tasks/status?task_id=' + encodeURIComponent(taskId));
+        const obj = await res.json();
+        resultEl.textContent = JSON.stringify(obj, null, 2);
+        if (obj && obj.result) {
+          prettyEl.innerHTML = formatPretty(obj.type, obj.result);
+        }
+        statusEl.textContent = res.ok ? (obj.status || '成功') : ('错误: ' + res.status);
+      } catch (e) {
+        statusEl.textContent = '请求失败';
+        resultEl.textContent = String(e);
+        prettyEl.innerHTML = '';
+      }
+    }
+    function startPolling(taskId) {
+      const statusEl = document.getElementById('status-poll');
+      const resultEl = document.getElementById('result-poll');
+      const prettyEl = document.getElementById('result-poll-pretty');
+      if (!taskId) { alert('请先输入任务ID'); return; }
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      statusEl.textContent = '轮询中...';
+      resultEl.textContent = '';
+      prettyEl.innerHTML = '';
+      let count = 0;
+      pollTimer = setInterval(async () => {
+        count++;
+        try {
+          const res = await getJSON('/api/tasks/status?task_id=' + encodeURIComponent(taskId));
+          const obj = await res.json();
+          resultEl.textContent = JSON.stringify(obj, null, 2);
+          prettyEl.innerHTML = obj && obj.result ? formatPretty(obj.type, obj.result) : '';
+          if (obj.status === 'succeed' || obj.status === 'failed') {
+            statusEl.textContent = obj.status === 'succeed' ? '完成' : '失败';
+            clearInterval(pollTimer); pollTimer = null;
+          } else {
+            statusEl.textContent = '轮询中 (' + count + ')';
+          }
+        } catch (e) {
+          statusEl.textContent = '请求失败';
+          resultEl.textContent = String(e);
+          prettyEl.innerHTML = '';
+          clearInterval(pollTimer); pollTimer = null;
+        }
+        if (count >= 30) {
+          statusEl.textContent = '已达到最大轮询次数';
+          clearInterval(pollTimer); pollTimer = null;
+        }
+      }, 1000);
+    }
+    document.getElementById('btn-poll').addEventListener('click', () => {
+      const taskId = document.getElementById('task-id').value.trim();
+      startPolling(taskId);
+    });
+    document.getElementById('btn-stop').addEventListener('click', () => {
+      const statusEl = document.getElementById('status-poll');
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      statusEl.textContent = '已停止';
+    });
+    // 新增：渲染任务列表到表格（增加“详情”按钮）
+    function statusBadgeClass(s) {
+      if (s === 'succeed') return 'badge succeed';
+      if (s === 'running') return 'badge running';
+      if (s === 'failed') return 'badge failed';
+      return 'badge pending';
+    }
+    function renderTaskList(obj) {
+      const tbody = document.getElementById('table-list-body');
+      const summary = document.getElementById('list-summary');
+      tbody.innerHTML = '';
+      const tasks = Array.isArray(obj?.tasks) ? obj.tasks : [];
+      const counts = { total: tasks.length, pending: 0, running: 0, succeed: 0, failed: 0 };
+      tasks.forEach(t => { counts[t.status] = (counts[t.status] || 0) + 1; });
+      summary.textContent = `总计 ${counts.total} | 待处理 ${counts.pending} | 进行中 ${counts.running} | 成功 ${counts.succeed} | 失败 ${counts.failed}`;
+      for (const t of tasks) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="mono">${t.id}</td>
+          <td>${t.type}</td>
+          <td><span class="${statusBadgeClass(t.status)}">${t.status}</span></td>
+          <td>${t.has_result ? '是' : '否'}</td>
+          <td>${t.has_error ? '是' : '否'}</td>
+          <td>
+            <button class="btn-copy-id" data-id="${t.id}">复制ID</button>
+            <button class="btn-detail-id" data-id="${t.id}">详情</button>
+            <button class="btn-poll-id" data-id="${t.id}">轮询</button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+    // 事件委托：处理表格中的操作按钮
+    document.getElementById('table-list-body').addEventListener('click', (e) => {
+      const target = e.target;
+      if (target && target.classList.contains('btn-copy-id')) {
+        const id = target.getAttribute('data-id');
+        document.getElementById('task-id').value = id;
+        try { navigator.clipboard && navigator.clipboard.writeText(id); } catch {}
+      } else if (target && target.classList.contains('btn-detail-id')) {
+        const id = target.getAttribute('data-id');
+        document.getElementById('task-id').value = id;
+        fetchStatusOnce(id);
+      } else if (target && target.classList.contains('btn-poll-id')) {
+        const id = target.getAttribute('data-id');
+        document.getElementById('task-id').value = id;
+        startPolling(id);
+      }
+    });
+    // 刷新任务列表
+    async function refreshList() {
+      const statusEl = document.getElementById('status-list');
+      const resultEl = document.getElementById('result-list');
+      statusEl.textContent = '请求中...';
+      resultEl.textContent = '';
+      try {
+        const res = await getJSON('/api/tasks/list');
+        const obj = await res.json();
+        statusEl.textContent = res.ok ? '成功' : `错误: ${res.status}`;
+        renderTaskList(obj);
+        resultEl.textContent = JSON.stringify(obj, null, 2);
+      } catch (e) {
+        statusEl.textContent = '请求失败';
+        resultEl.textContent = String(e);
+      }
+    }
+    document.getElementById('btn-refresh-list').addEventListener('click', refreshList);
+    // 自动刷新控制
+    let listTimer = null;
+    function startAutoRefresh() {
+      const intervalSec = Math.max(1, Number(document.getElementById('auto-refresh-interval').value || 2));
+      if (listTimer) clearInterval(listTimer);
+      listTimer = setInterval(refreshList, intervalSec * 1000);
+    }
+    document.getElementById('auto-refresh-list').addEventListener('change', (e) => {
+      if (e.target.checked) {
+        startAutoRefresh();
+      } else {
+        if (listTimer) { clearInterval(listTimer); listTimer = null; }
+      }
+    });
+    document.getElementById('auto-refresh-interval').addEventListener('change', () => {
+      if (document.getElementById('auto-refresh-list').checked) startAutoRefresh();
+    });
+    // 页面初次加载时刷新一次
+    refreshList();
+  </script>
+</body>
+</html>
