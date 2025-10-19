@@ -5,6 +5,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 from typing import Any, Dict, List, Optional
+import json
+import urllib.request as urlrequest
+import ssl
+import time
+try:
+    import requests
+except Exception:
+    requests = None
+
 try:
     import dashscope
     from dashscope import Generation, Chat
@@ -12,6 +21,7 @@ except Exception:
     dashscope = None
     Generation = None
     Chat = None
+from fastapi.staticfiles import StaticFiles
 
 
 def _clean_env_value(value: str | None, default: str = "") -> str:
@@ -27,6 +37,7 @@ class QwenSettings(BaseModel):
     model: str
     base_url: str
     timeout: int = 30
+    verify_ssl: bool = True
 
     @field_validator("api_key")
     @classmethod
@@ -49,16 +60,19 @@ def load_settings() -> QwenSettings:
     load_dotenv(dotenv_path=env_path, override=False)
 
     timeout_str = _clean_env_value(os.getenv("Timeout"), "30")
+    verify_ssl_str = _clean_env_value(os.getenv("QWEN_VERIFY_SSL"), "true")
     settings = QwenSettings(
         api_key=_clean_env_value(os.getenv("QWEN_API_KEY")),
         model=_clean_env_value(os.getenv("QWEN_MODEL"), "qwen-turbo"),
         base_url=_clean_env_value(os.getenv("QWEN_BASE_URL"), "https://dashscope.aliyuncs.com/compatible-mode/v1"),
         timeout=int(timeout_str),
+        verify_ssl=verify_ssl_str.lower() in ("1", "true", "yes", "y", "on"),
     )
     return settings
 
 
 app = FastAPI(title="FastAPI Demo with Config")
+app.mount("/tests", StaticFiles(directory="tests", html=True), name="tests")
 
 
 class QwenClient:
@@ -66,21 +80,36 @@ class QwenClient:
 
     def __init__(self, settings: QwenSettings) -> None:
         self.settings = settings
-        if dashscope is None:
-            raise RuntimeError("dashscope SDK 未安装或导入失败")
-        dashscope.api_key = settings.api_key
+        self.use_http_fallback = (dashscope is None or Generation is None or Chat is None)
+        if not self.use_http_fallback:
+            dashscope.api_key = settings.api_key
+        else:
+            logger.warning("dashscope SDK 不可用，启用HTTP兼容模式访问: {}", settings.base_url)
 
     def _extract_text(self, resp: Any) -> str:
         """尽量从响应中提取文本内容。"""
-        # 常见：对象有 output_text 属性
-        if hasattr(resp, "output_text"):
+        # 常见：对象有 output_text 属性（避免 hasattr 触发 SDK 的特殊 __getattr__ 异常）
+        try:
+            output_text = getattr(resp, "output_text", None)
+        except Exception:
+            output_text = None
+        if output_text is not None:
             try:
-                return str(resp.output_text)
+                return str(output_text)
+            except Exception:
+                pass
+        # 顶层 dict 直接含有 output_text
+        if isinstance(resp, dict) and "output_text" in resp:
+            try:
+                return str(resp["output_text"])
             except Exception:
                 pass
         # 兼容字典或包含 output/choices/message 的结构
         try:
-            output = getattr(resp, "output", None)
+            try:
+                output = getattr(resp, "output", None)
+            except Exception:
+                output = None
             if output is None and isinstance(resp, dict):
                 output = resp.get("output")
             if isinstance(output, dict):
@@ -93,13 +122,91 @@ class QwenClient:
                     text = choices[0].get("text")
                     if isinstance(text, str):
                         return text
+            # 顶层 choices（某些兼容模式返回）
+            if isinstance(resp, dict):
+                choices = resp.get("choices")
+                if isinstance(choices, list) and choices:
+                    # OpenAI 兼容结构：choices[0].message.content
+                    msg = choices[0].get("message")
+                    if isinstance(msg, dict) and "content" in msg:
+                        return str(msg["content"]) 
+                    # 或者直接 text 字段
+                    if "text" in choices[0]:
+                        return str(choices[0]["text"]) 
         except Exception:
             pass
         # 兜底：转换为字符串
         return str(resp)
 
+    def _http_request(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """在 dashscope SDK 不可用时，使用兼容模式 HTTP 直接调用。"""
+        url = self.settings.base_url.rstrip("/") + "/" + endpoint.lstrip("/")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "TranslationAssistant/1.0",
+            "Authorization": f"Bearer {self.settings.api_key}",
+            "Connection": "close",
+            "Accept-Encoding": "identity",
+        }
+        data = json.dumps(payload, ensure_ascii=False)
+        # 优先使用 requests（若可用），更稳健的 TLS 实现
+        if requests is not None:
+            last_err: Exception | None = None
+            verify = self.settings.verify_ssl
+            for attempt in range(3):
+                try:
+                    r = requests.post(
+                        url,
+                        headers=headers,
+                        data=data.encode("utf-8"),
+                        timeout=self.settings.timeout,
+                        verify=verify,
+                    )
+                    r.raise_for_status()
+                    return r.json()
+                except Exception as e:
+                    last_err = e
+                    # 如果是 SSL 错误，下一次尝试关闭校验
+                    if attempt == 0 and verify:
+                        verify = False
+                    if attempt < 2:
+                        time.sleep(0.5 * (2 ** attempt))
+                    else:
+                        raise last_err
+        # 退回 urllib 实现
+        req = urlrequest.Request(
+            url,
+            data=data.encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        context = ssl.create_default_context() if self.settings.verify_ssl else ssl._create_unverified_context()
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                with urlrequest.urlopen(req, timeout=self.settings.timeout, context=context) as resp:
+                    body = resp.read()
+                    return json.loads(body.decode("utf-8"))
+            except Exception as e:
+                last_err = e
+                # 若是 SSL 异常，自动切换为不校验的上下文重试一次
+                if attempt == 0 and isinstance(e, ssl.SSLError):
+                    context = ssl._create_unverified_context()
+                if attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))
+                else:
+                    raise last_err
+
+
     def generate(self, prompt: str, **kwargs: Any) -> str:
         """通用单轮文本生成。"""
+        if self.use_http_fallback:
+            payload: Dict[str, Any] = {"model": self.settings.model, "prompt": prompt}
+            if kwargs:
+                payload.update(kwargs)
+            resp = self._http_request("completions", payload)
+            return self._extract_text(resp)
         try:
             resp = Generation.call(
                 model=self.settings.model,
@@ -114,6 +221,12 @@ class QwenClient:
 
     def chat(self, messages: List[Dict[str, str]], **kwargs: Any) -> str:
         """多轮对话（OpenAI 风格 messages）。"""
+        if self.use_http_fallback:
+            payload: Dict[str, Any] = {"model": self.settings.model, "messages": messages}
+            if kwargs:
+                payload.update(kwargs)
+            resp = self._http_request("chat/completions", payload)
+            return self._extract_text(resp)
         try:
             resp = Chat.call(
                 model=self.settings.model,
@@ -207,14 +320,14 @@ def on_startup() -> None:
     settings = load_settings()
     app.state.settings = settings  # 将配置挂载至全局应用状态，供各路由/服务使用
 
-    # 初始化通义千问客户端
-    if dashscope is not None:
-        app.state.qwen_client = QwenClient(settings)
-        # 初始化业务服务（翻译与总结），供路由或其它模块复用
-        app.state.translation_service = TranslationService(app.state.qwen_client)
-        app.state.summarization_service = SummarizationService(app.state.qwen_client)
-    else:
-        logger.warning("dashscope SDK 未可用，QwenClient 未初始化。")
+    # 初始化通义千问客户端（若 SDK 不可用，自动启用 HTTP 兼容模式）
+    app.state.qwen_client = QwenClient(settings)
+    if getattr(app.state.qwen_client, "use_http_fallback", False):
+        logger.warning("dashscope SDK 未可用，使用兼容HTTP模式: {}", settings.base_url)
+
+    # 初始化业务服务（翻译与总结），供路由或其它模块复用
+    app.state.translation_service = TranslationService(app.state.qwen_client)
+    app.state.summarization_service = SummarizationService(app.state.qwen_client)
 
     # 避免泄露密钥，仅打印掩码后的信息
     masked_key = (

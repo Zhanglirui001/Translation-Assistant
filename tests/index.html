@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Translation-Assistant 前端测试界面</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Microsoft YaHei", "Noto Sans", sans-serif; margin: 0; padding: 24px; line-height: 1.6; }
+    header { margin-bottom: 16px; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    .desc { color: #666; font-size: 14px; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; background: rgba(255,255,255,0.6); backdrop-filter: blur(4px); }
+    .card h2 { margin: 0 0 8px; font-size: 16px; }
+    textarea, input[type="text"] { width: 100%; box-sizing: border-box; padding: 8px; border-radius: 8px; border: 1px solid #ccc; font-size: 14px; }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #888; cursor: pointer; }
+    .result { margin-top: 8px; padding: 8px; border-radius: 8px; background: #f6f8fa; min-height: 48px; white-space: pre-wrap; }
+    .muted { color: #666; font-size: 12px; }
+    footer { margin-top: 24px; font-size: 12px; color: #666; }
+    .ok { color: #0a7; }
+    .err { color: #d33; }
+    a { color: #06c; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Translation-Assistant 前端测试界面</h1>
+    <div class="desc">用于调试和验证后端 API（翻译与摘要）。当前服务器：<span id="base">-</span>。你也可以打开 <a href="/docs" target="_blank">/docs</a> 进行接口自测。</div>
+  </header>
+
+  <section class="grid">
+    <div class="card" id="card-zh2en">
+      <h2>中文翻译英文 /api/translate/zh-to-en</h2>
+      <textarea id="input-zh" rows="4" placeholder="输入中文文本，例如：你好，世界！"></textarea>
+      <div class="row">
+        <button id="btn-zh2en">翻译为英文</button>
+        <span id="status-zh2en" class="muted">等待操作</span>
+      </div>
+      <div class="result" id="result-zh2en"></div>
+    </div>
+
+    <div class="card" id="card-en2zh">
+      <h2>英文翻译中文 /api/translate/en-to-zh</h2>
+      <textarea id="input-en" rows="4" placeholder="Input English text, e.g., Hello, world!"></textarea>
+      <div class="row">
+        <button id="btn-en2zh">Translate to Chinese</button>
+        <span id="status-en2zh" class="muted">Waiting for action</span>
+      </div>
+      <div class="result" id="result-en2zh"></div>
+    </div>
+
+    <div class="card" id="card-sum">
+      <h2>文本摘要 /api/summarize</h2>
+      <textarea id="input-sum" rows="6" placeholder="输入需要摘要的文本"></textarea>
+      <div class="row">
+        <button id="btn-sum">生成摘要</button>
+        <span id="status-sum" class="muted">等待操作</span>
+      </div>
+      <div class="result" id="result-sum"></div>
+    </div>
+  </section>
+
+  <footer>
+    提示：接口可能返回纯文本或 JSON，为了兼容不同的返回格式，本页面会自动解析常见结构（result、text、output.text、choices[0].message.content）。
+  </footer>
+
+  <script>
+    const base = window.location.origin;
+    document.getElementById('base').textContent = base;
+
+    async function postJSON(path, payload) {
+      const url = base + path;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return res;
+    }
+
+    function extractTextFromObj(obj) {
+      if (!obj || typeof obj !== 'object') return '';
+      // 常见字段优先
+      if (typeof obj.result === 'string') return obj.result;
+      if (typeof obj.text === 'string') return obj.text;
+      // 兼容 output.*
+      if (obj.output) {
+        if (typeof obj.output.text === 'string') return obj.output.text;
+        if (Array.isArray(obj.output.choices) && obj.output.choices.length > 0) {
+          const c0 = obj.output.choices[0];
+          if (c0 && c0.message && typeof c0.message.content === 'string') return c0.message.content;
+          if (typeof c0.text === 'string') return c0.text;
+        }
+      }
+      // 兜底：字符串化对象
+      try { return JSON.stringify(obj); } catch { return String(obj); }
+    }
+
+    async function getResponseText(res) {
+      const raw = await res.text();
+      // 尝试解析为 JSON
+      try {
+        const obj = JSON.parse(raw);
+        const parsed = extractTextFromObj(obj);
+        if (parsed && typeof parsed === 'string' && parsed.trim()) return parsed;
+      } catch {}
+      // 如果不是 JSON 或解析不到文本，直接返回原始字符串
+      return raw;
+    }
+
+    function setStatus(el, ok, msg) {
+      el.textContent = msg;
+      el.className = 'muted ' + (ok ? 'ok' : 'err');
+    }
+
+    // 事件绑定
+    document.getElementById('btn-zh2en').addEventListener('click', async () => {
+      const text = document.getElementById('input-zh').value.trim();
+      const statusEl = document.getElementById('status-zh2en');
+      const resultEl = document.getElementById('result-zh2en');
+      if (!text) { setStatus(statusEl, false, '请输入中文文本'); return; }
+      setStatus(statusEl, true, '请求中...');
+      try {
+        const res = await postJSON('/api/translate/zh-to-en', { text });
+        const out = await getResponseText(res);
+        resultEl.textContent = out;
+        setStatus(statusEl, res.ok, res.ok ? '成功' : `失败 (${res.status})`);
+      } catch (e) {
+        setStatus(statusEl, false, '请求失败');
+        resultEl.textContent = String(e);
+      }
+    });
+
+    document.getElementById('btn-en2zh').addEventListener('click', async () => {
+      const text = document.getElementById('input-en').value.trim();
+      const statusEl = document.getElementById('status-en2zh');
+      const resultEl = document.getElementById('result-en2zh');
+      if (!text) { setStatus(statusEl, false, 'Please input English text'); return; }
+      setStatus(statusEl, true, 'Requesting...');
+      try {
+        const res = await postJSON('/api/translate/en-to-zh', { text });
+        const out = await getResponseText(res);
+        resultEl.textContent = out;
+        setStatus(statusEl, res.ok, res.ok ? 'Success' : `Failed (${res.status})`);
+      } catch (e) {
+        setStatus(statusEl, false, 'Request error');
+        resultEl.textContent = String(e);
+      }
+    });
+
+    document.getElementById('btn-sum').addEventListener('click', async () => {
+      const text = document.getElementById('input-sum').value.trim();
+      const statusEl = document.getElementById('status-sum');
+      const resultEl = document.getElementById('result-sum');
+      if (!text) { setStatus(statusEl, false, '请输入需要摘要的文本'); return; }
+      setStatus(statusEl, true, '请求中...');
+      try {
+        const res = await postJSON('/api/summarize', { text });
+        const out = await getResponseText(res);
+        resultEl.textContent = out;
+        setStatus(statusEl, res.ok, res.ok ? '成功' : `失败 (${res.status})`);
+      } catch (e) {
+        setStatus(statusEl, false, '请求失败');
+        resultEl.textContent = String(e);
+      }
+    });
+  </script>
+</body>
+</html>
