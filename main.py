@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from loguru import logger
 from pydantic import BaseModel, field_validator
 from pathlib import Path
@@ -237,3 +237,70 @@ def on_startup() -> None:
 
 def get_settings() -> QwenSettings:
     return app.state.settings
+
+
+class TranslateRequest(BaseModel):
+    text: str
+
+    @field_validator("text")
+    @classmethod
+    def text_non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("text 不能为空")
+        return v.strip()
+
+
+class SummarizeRequest(BaseModel):
+    text: str
+    target_lang: Optional[str] = None
+    max_points: int = 5
+
+    @field_validator("text")
+    @classmethod
+    def text_non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("text 不能为空")
+        return v.strip()
+
+    @field_validator("max_points")
+    @classmethod
+    def points_positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("max_points 必须为正整数")
+        return v
+
+
+# 翻译接口：中文 -> 英文
+@app.post("/api/translate/zh-to-en")
+def api_translate_zh_to_en(req: TranslateRequest) -> Dict[str, str]:
+    svc = get_translation_service()
+    try:
+        result = svc.zh_to_en(req.text)
+        return {"result": result}
+    except Exception as e:
+        logger.error("api_translate_zh_to_en 调用失败: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 翻译接口：英文 -> 中文
+@app.post("/api/translate/en-to-zh")
+def api_translate_en_to_zh(req: TranslateRequest) -> Dict[str, str]:
+    svc = get_translation_service()
+    try:
+        result = svc.en_to_zh(req.text)
+        return {"result": result}
+    except Exception as e:
+        logger.error("api_translate_en_to_zh 调用失败: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# 总结接口：精简长文本
+@app.post("/api/summarize")
+def api_summarize(req: SummarizeRequest) -> Dict[str, str]:
+    svc = get_summarization_service()
+    try:
+        result = svc.summarize(req.text, target_lang=req.target_lang, max_points=req.max_points)
+        return {"result": result}
+    except Exception as e:
+        logger.error("api_summarize 调用失败: {}", e)
+        raise HTTPException(status_code=500, detail=str(e))
